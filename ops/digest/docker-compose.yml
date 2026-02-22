@@ -1,0 +1,29 @@
+services:
+  fizzy:
+    image: ghcr.io/basecamp/fizzy:main
+    container_name: fizzy-digest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SECRET_KEY_BASE: ${FIZZY_SECRET_KEY_BASE}
+      DISABLE_SSL: ${FIZZY_DISABLE_SSL:-true}
+      TLS_DOMAIN: ${FIZZY_TLS_DOMAIN:-}
+      BASE_URL: ${FIZZY_BASE_URL:-http://localhost:3333}
+      MAILER_FROM_ADDRESS: ${FIZZY_MAILER_FROM_ADDRESS:-}
+      SMTP_ADDRESS: ${FIZZY_SMTP_ADDRESS:-}
+      SMTP_PORT: ${FIZZY_SMTP_PORT:-}
+      SMTP_USERNAME: ${FIZZY_SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${FIZZY_SMTP_PASSWORD:-}
+      SMTP_DOMAIN: ${FIZZY_SMTP_DOMAIN:-}
+      SMTP_AUTHENTICATION: ${FIZZY_SMTP_AUTHENTICATION:-}
+      SMTP_TLS: ${FIZZY_SMTP_TLS:-}
+      SMTP_SSL_VERIFY_MODE: ${FIZZY_SMTP_SSL_VERIFY_MODE:-}
+      MULTI_TENANT: ${FIZZY_MULTI_TENANT:-false}
+    ports:
+      - "${FIZZY_PORT:-3333}:80"
+    volumes:
+      - fizzy_storage:/rails/storage
+
+volumes:
+  fizzy_storage:

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Sync digest PRODUCT_ROADMAP_INTERNAL.md actionable items to a Fizzy board.
+"""Sync digest PRODUCT_ROADMAP_INTERNAL.md open action items to a Fizzy board.
 
 This script is intentionally locked to:
 - digest doc: PRODUCT_ROADMAP_INTERNAL.md
 - digest branch: dev
 
-Two-way mode (enabled by default) additionally:
-- Marks markdown checkboxes based on Fizzy closed/native DONE state.
-- Appends unsynced Fizzy cards into markdown as checklist items.
+One-way sync (MD -> Fizzy):
+- Open items (- [ ]) are created/updated/moved in Fizzy.
+- Completed items (- [x]) are ignored; Fizzy manages completion natively.
+- Cards for items removed from the doc can be closed (FIZZY_CLOSE_OBSOLETE=true).
+- Empty sync-managed columns are removed after each sync.
+
+Fizzy is the source of truth for task state (completion, ordering within columns).
 """
 
 from __future__ import annotations
@@ -31,10 +35,8 @@ ACTION_DOC_CANDIDATES = [
     ACTION_DOC_BASENAME,
 ]
 REQUIRED_BRANCH = "dev"
-LEGACY_DONE_COLUMN_NAME = "DONE"
 SYNC_KEY_PREFIX = "Digest Sync Key: "
 SYNC_KEY_RE = re.compile(r"^Digest Sync Key:\s*(\S+)\s*$", re.MULTILINE)
-SECTION_RE = re.compile(r"^Section:\s*(.+?)\s*$", re.MULTILINE)
 HEADING_RE = re.compile(r"^###\s+(.+?)\s*$")
 CHECKLIST_RE = re.compile(r"^(\s*-\s+\[)( |x|X)(\]\s+)(.+?)\s*$")
 
@@ -58,11 +60,8 @@ class ActionItem:
     details: str
     heading: str
     source_column: str
-    column: str
     source_line: int
-    line_index: int
     order: int
-    completed: bool
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -99,12 +98,6 @@ def make_title(item_text: str) -> str:
     return title
 
 
-def card_sync_title(item: ActionItem) -> str:
-    if not item.completed:
-        return item.title
-    return f"[{item.source_column}] {item.title}"
-
-
 def make_key(heading: str, item_text: str) -> str:
     normalized = f"{clean_text(heading).lower()}|{clean_text(item_text).lower()}"
     digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
@@ -126,13 +119,14 @@ def resolve_action_doc_path(digest_repo: str, explicit_path: Optional[str]) -> O
     return None
 
 
-def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str], List[str]]:
+def parse_open_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str]]:
+    """Parse only open (- [ ]) checklist items. Returns (items, section_order)."""
     with open(action_doc_path, "r", encoding="utf-8") as handle:
         lines = handle.readlines()
 
     current_heading = "Uncategorized"
     section_order: List[str] = []
-    seen_open_sections = set()
+    seen_sections: set = set()
     items: List[ActionItem] = []
     order = 0
 
@@ -149,14 +143,16 @@ def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str
             continue
 
         mark = item_match.group(2).lower()
-        completed = mark == "x"
+        if mark == "x":
+            continue  # skip completed items entirely
+
         details = clean_text(item_match.group(4))
         if not details:
             continue
 
         source_column = heading_to_column(current_heading)
-        if not completed and source_column not in seen_open_sections:
-            seen_open_sections.add(source_column)
+        if source_column not in seen_sections:
+            seen_sections.add(source_column)
             section_order.append(source_column)
 
         order += 1
@@ -167,163 +163,12 @@ def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str
                 details=details,
                 heading=current_heading,
                 source_column=source_column,
-                column=source_column,
                 source_line=line_index + 1,
-                line_index=line_index,
                 order=order,
-                completed=completed,
             )
         )
 
-    return items, section_order, lines
-
-
-def set_checkbox_state(line: str, completed: bool) -> str:
-    newline = "\n" if line.endswith("\n") else ""
-    content = line.rstrip("\n")
-    match = CHECKLIST_RE.match(content)
-    if not match:
-        return line
-
-    marker = "x" if completed else " "
-    updated = f"{match.group(1)}{marker}{match.group(3)}{match.group(4)}"
-    return updated + newline
-
-
-def parse_section_from_description(description: str) -> Optional[str]:
-    if not description:
-        return None
-    match = SECTION_RE.search(description)
-    if not match:
-        return None
-    return clean_text(match.group(1)) or None
-
-
-def card_column_name(card: dict) -> str:
-    column = card.get("column") or {}
-    return clean_text(str(column.get("name") or ""))
-
-
-def card_done_state(card: dict) -> bool:
-    if card.get("closed"):
-        return True
-    return card_column_name(card) == LEGACY_DONE_COLUMN_NAME
-
-
-def card_details_for_markdown(card: dict) -> str:
-    description = str(card.get("description") or "")
-    for raw_line in description.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("Digest actionable item sync"):
-            continue
-        if line.startswith("Source doc:"):
-            continue
-        if line.startswith("Section:"):
-            continue
-        if line.startswith("Digest branch:"):
-            continue
-        if line.startswith(SYNC_KEY_PREFIX):
-            continue
-        return clean_text(line)
-
-    return clean_text(str(card.get("title") or ""))
-
-
-def find_heading_line(lines: List[str], column_name: str) -> Optional[int]:
-    for idx, line in enumerate(lines):
-        match = HEADING_RE.match(line.rstrip("\n"))
-        if not match:
-            continue
-        if heading_to_column(match.group(1)) == column_name:
-            return idx
-    return None
-
-
-def insert_item_into_section(lines: List[str], source_column: str, details: str, completed: bool) -> int:
-    heading_idx = find_heading_line(lines, source_column)
-
-    if heading_idx is None:
-        if lines and lines[-1].strip() != "":
-            lines.append("\n")
-        lines.append(f"### {source_column}\n")
-        heading_idx = len(lines) - 1
-
-    insert_idx = heading_idx + 1
-    while insert_idx < len(lines):
-        if HEADING_RE.match(lines[insert_idx].rstrip("\n")):
-            break
-        insert_idx += 1
-
-    marker = "x" if completed else " "
-    lines.insert(insert_idx, f"- [{marker}] {details}\n")
-    return insert_idx
-
-
-def apply_two_way_markdown_updates(
-    lines: List[str],
-    items: List[ActionItem],
-    cards: List[dict],
-) -> Tuple[List[str], Dict[str, str], bool]:
-    changed = False
-    upsert_card_key_by_number: Dict[str, str] = {}
-
-    items_by_key: Dict[str, ActionItem] = {item.key: item for item in items}
-    max_order = max((item.order for item in items), default=0)
-
-    for card in cards:
-        card_number = str(card.get("number"))
-        key = extract_sync_key(card.get("description") or "")
-        done = card_done_state(card)
-
-        if key and key in items_by_key:
-            item = items_by_key[key]
-            if item.completed != done:
-                lines[item.line_index] = set_checkbox_state(lines[item.line_index], done)
-                changed = True
-            continue
-
-        if key:
-            continue
-
-        details = card_details_for_markdown(card)
-        if not details:
-            continue
-
-        column_name = card_column_name(card)
-        if column_name and column_name != LEGACY_DONE_COLUMN_NAME:
-            source_column = column_name
-        else:
-            source_column = heading_to_column(parse_section_from_description(card.get("description") or "") or "Uncategorized")
-
-        derived_key = make_key(source_column, details)
-        if derived_key not in items_by_key:
-            line_index = insert_item_into_section(lines, source_column, details, done)
-            changed = True
-            max_order += 1
-            new_item = ActionItem(
-                key=derived_key,
-                title=make_title(details),
-                details=details,
-                heading=source_column,
-                source_column=source_column,
-                column=source_column,
-                source_line=line_index + 1,
-                line_index=line_index,
-                order=max_order,
-                completed=done,
-            )
-            items_by_key[derived_key] = new_item
-
-        upsert_card_key_by_number[card_number] = derived_key
-
-    return lines, upsert_card_key_by_number, changed
-
-
-def write_lines(path: str, lines: List[str]) -> None:
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.writelines(lines)
+    return items, section_order
 
 
 def parse_next_link(link_header: Optional[str]) -> Optional[str]:
@@ -619,14 +464,10 @@ def sync(
     digest_branch: str,
     items: List[ActionItem],
     close_obsolete: bool,
-    two_way: bool,
 ) -> Dict[str, int]:
-    del two_way
-
     stats = {
         "created": 0,
         "updated": 0,
-        "closed": 0,
         "reopened": 0,
         "moved": 0,
         "closed_obsolete": 0,
@@ -640,41 +481,29 @@ def sync(
     for item in items:
         card = existing_by_key.get(item.key)
         description = build_description(item, action_doc_path, digest_branch)
-        target_column_id = column_ids.get(item.source_column)
-        desired_title = card_sync_title(item)
+        target_column_id = column_ids[item.source_column]
 
         if card:
             card_number = str(card["number"])
 
             needs_update = (
-                card.get("title") != desired_title
+                card.get("title") != item.title
                 or (card.get("description") or "") != description
             )
             if needs_update:
                 client.request(
                     "PUT",
                     f"/{account_slug}/cards/{card_number}",
-                    payload={"card": {"title": desired_title, "description": description}},
+                    payload={"card": {"title": item.title, "description": description}},
                     expected=(200,),
                 )
                 stats["updated"] += 1
             else:
                 stats["unchanged"] += 1
 
-            if item.completed:
-                if not card.get("closed"):
-                    close_card(client, account_slug, card_number)
-                    stats["closed"] += 1
-                continue
-
             if card.get("closed"):
                 reopen_card(client, account_slug, card_number)
                 stats["reopened"] += 1
-
-            if not target_column_id:
-                raise RuntimeError(
-                    f"Missing destination column for open item section '{item.source_column}'"
-                )
 
             current_column_id = ((card.get("column") or {}).get("id") or "").strip()
             if current_column_id != target_column_id:
@@ -686,7 +515,7 @@ def sync(
         _, headers, _ = client.request(
             "POST",
             f"/{account_slug}/boards/{board_id}/cards",
-            payload={"card": {"title": desired_title, "description": description}},
+            payload={"card": {"title": item.title, "description": description}},
             expected=(201,),
         )
         card_number = parse_created_card_number(headers)
@@ -694,20 +523,11 @@ def sync(
             refreshed = get_existing_synced_cards(get_board_cards(client, account_slug, board_id))
             created = refreshed.get(item.key)
             if not created:
-                raise RuntimeError(f"Could not resolve new card number for '{desired_title}'")
+                raise RuntimeError(f"Could not resolve new card number for '{item.title}'")
             card_number = str(created["number"])
 
+        move_card_to_column(client, account_slug, card_number, target_column_id)
         stats["created"] += 1
-        if item.completed:
-            close_card(client, account_slug, card_number)
-            stats["closed"] += 1
-        else:
-            if not target_column_id:
-                raise RuntimeError(
-                    f"Missing destination column for open item section '{item.source_column}'"
-                )
-            move_card_to_column(client, account_slug, card_number, target_column_id)
-            stats["moved"] += 1
 
     if close_obsolete:
         for key, card in existing_by_key.items():
@@ -761,26 +581,13 @@ def parse_args() -> argparse.Namespace:
         dest="close_obsolete",
         action="store_true",
         default=env_bool("FIZZY_CLOSE_OBSOLETE", True),
-        help="Close synced cards that no longer exist as checklist items",
+        help="Close synced cards that no longer exist as open checklist items",
     )
     parser.add_argument(
         "--no-close-obsolete",
         dest="close_obsolete",
         action="store_false",
         help="Do not close cards that disappear from source doc",
-    )
-    parser.add_argument(
-        "--two-way",
-        dest="two_way",
-        action="store_true",
-        default=env_bool("FIZZY_TWO_WAY_SYNC", True),
-        help="Enable two-way sync (Fizzy completion/new-card write-back to markdown)",
-    )
-    parser.add_argument(
-        "--no-two-way",
-        dest="two_way",
-        action="store_false",
-        help="Disable Fizzy -> markdown write-back behavior",
     )
     parser.add_argument(
         "--dry-run",
@@ -815,21 +622,15 @@ def main() -> int:
         )
         return 2
 
-    items, section_order, lines = parse_action_items(action_doc_path)
+    items, section_order = parse_open_items(action_doc_path)
     if items:
-        print(f"Found {len(items)} checklist items in {action_doc_path}")
-        open_count = sum(1 for item in items if not item.completed)
-        completed_count = sum(1 for item in items if item.completed)
-        print(f"- open: {open_count}")
-        print(f"- completed: {completed_count}")
+        print(f"Found {len(items)} open checklist items in {action_doc_path}")
         for section in section_order:
-            count = sum(1 for item in items if not item.completed and item.source_column == section)
-            print(f"- {section}: {count}")
+            count = sum(1 for item in items if item.source_column == section)
+            print(f"  {section}: {count}")
     else:
-        if not args.two_way:
-            print(f"No checklist items found in {action_doc_path}")
-            return 0
-        print(f"No checklist items found in {action_doc_path}; continuing with two-way card import.")
+        print(f"No open checklist items found in {action_doc_path}")
+        return 0
 
     if args.dry_run:
         return 0
@@ -844,42 +645,7 @@ def main() -> int:
     board_id = ensure_board(client, account_slug, args.fizzy_board_name)
     column_ids = ensure_columns(client, account_slug, board_id, section_order)
 
-    if args.two_way:
-        board_cards = get_board_cards(client, account_slug, board_id)
-        lines, upsert_card_key_by_number, changed = apply_two_way_markdown_updates(lines, items, board_cards)
-
-        if changed:
-            write_lines(action_doc_path, lines)
-            print("Applied Fizzy -> markdown updates")
-
-        if changed or upsert_card_key_by_number:
-            items, section_order, _ = parse_action_items(action_doc_path)
-            column_ids = ensure_columns(client, account_slug, board_id, section_order)
-
-            if upsert_card_key_by_number:
-                by_key = {item.key: item for item in items}
-                updated_cards = 0
-                for card_number, key in upsert_card_key_by_number.items():
-                    item = by_key.get(key)
-                    if not item:
-                        continue
-                    description = build_description(item, action_doc_path, branch)
-                    client.request(
-                        "PUT",
-                        f"/{account_slug}/cards/{card_number}",
-                        payload={"card": {"description": description}},
-                        expected=(200,),
-                    )
-                    updated_cards += 1
-
-                if updated_cards:
-                    print(f"Linked {updated_cards} Fizzy card(s) with sync keys")
-
-    if not items:
-        print("No checklist items available after two-way processing")
-        return 0
-
-    managed_columns = sorted({item.source_column for item in items} | {LEGACY_DONE_COLUMN_NAME})
+    managed_columns = list(section_order)
 
     stats = sync(
         client=client,
@@ -890,7 +656,6 @@ def main() -> int:
         digest_branch=branch,
         items=items,
         close_obsolete=args.close_obsolete,
-        two_way=args.two_way,
     )
     stats["archived_columns"] = cleanup_empty_managed_columns(
         client=client,
@@ -901,17 +666,8 @@ def main() -> int:
     )
 
     print("Sync complete")
-    for key in (
-        "created",
-        "updated",
-        "closed",
-        "reopened",
-        "moved",
-        "closed_obsolete",
-        "archived_columns",
-        "unchanged",
-    ):
-        print(f"- {key}: {stats[key]}")
+    for key in ("created", "updated", "reopened", "moved", "closed_obsolete", "archived_columns", "unchanged"):
+        print(f"  {key}: {stats[key]}")
 
     return 0
 

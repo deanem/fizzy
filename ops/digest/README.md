@@ -22,25 +22,27 @@ Use this Fizzy instance as the operational board for Digest product work:
 
 ## Board Model
 - Board name default: `Digest Product Action Items` (`FIZZY_BOARD_NAME` to override)
-- Columns map from roadmap `###` headings
-- Completed checklist items map to a dedicated `DONE` column
+- Open columns map from roadmap `###` headings that still have open checklist items
+- Completed checklist items use Fizzy native DONE (closed cards), not a custom workflow column
+- Completed cards are prefixed with section context in title (for example: `[Milestone B] ...`)
+- Empty sync-managed columns are automatically removed after sync
 - Synced cards include a stable key in description:
   - `Digest Sync Key: digest-internal-...`
 
 ## Sync Behavior
 ### Markdown -> Fizzy
 - `- [ ] item` creates/updates an open card in its mapped section column.
-- `- [x] item` creates/updates a card in `DONE`.
+- `- [x] item` creates/updates a closed card in native DONE.
 - Removed markdown items can close obsolete synced cards (`FIZZY_CLOSE_OBSOLETE=true`).
 
 ### Fizzy -> Markdown (Two-way)
-- Card moved to `DONE` marks markdown item as `- [x]`.
-- Card moved out of `DONE` marks markdown item as `- [ ]`.
+- Card closed (native DONE) marks markdown item as `- [x]`.
+- Card reopened marks markdown item as `- [ ]`.
 - New card without sync key is appended into markdown as a checklist item in the mapped section, then linked with a generated sync key.
 
 ## Conflict Policy
 - Sync key identity is authoritative.
-- Completion state follows Fizzy DONE status in two-way mode.
+- Completion state follows Fizzy closed/native DONE status in two-way mode.
 - Title/details normalize back to markdown text on full sync.
 
 ## 1) Start Fizzy Container

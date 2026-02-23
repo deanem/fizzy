@@ -6,7 +6,7 @@ This script is intentionally locked to:
 - digest branch: dev
 
 Two-way mode (enabled by default) additionally:
-- Marks markdown checkboxes based on Fizzy DONE state.
+- Marks markdown checkboxes based on Fizzy closed/native DONE state.
 - Appends unsynced Fizzy cards into markdown as checklist items.
 """
 
@@ -31,7 +31,7 @@ ACTION_DOC_CANDIDATES = [
     ACTION_DOC_BASENAME,
 ]
 REQUIRED_BRANCH = "dev"
-DONE_COLUMN_NAME = "DONE"
+LEGACY_DONE_COLUMN_NAME = "DONE"
 SYNC_KEY_PREFIX = "Digest Sync Key: "
 SYNC_KEY_RE = re.compile(r"^Digest Sync Key:\s*(\S+)\s*$", re.MULTILINE)
 SECTION_RE = re.compile(r"^Section:\s*(.+?)\s*$", re.MULTILINE)
@@ -99,6 +99,12 @@ def make_title(item_text: str) -> str:
     return title
 
 
+def card_sync_title(item: ActionItem) -> str:
+    if not item.completed:
+        return item.title
+    return f"[{item.source_column}] {item.title}"
+
+
 def make_key(heading: str, item_text: str) -> str:
     normalized = f"{clean_text(heading).lower()}|{clean_text(item_text).lower()}"
     digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
@@ -126,7 +132,7 @@ def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str
 
     current_heading = "Uncategorized"
     section_order: List[str] = []
-    seen_sections = set()
+    seen_open_sections = set()
     items: List[ActionItem] = []
     order = 0
 
@@ -149,8 +155,8 @@ def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str
             continue
 
         source_column = heading_to_column(current_heading)
-        if source_column not in seen_sections:
-            seen_sections.add(source_column)
+        if not completed and source_column not in seen_open_sections:
+            seen_open_sections.add(source_column)
             section_order.append(source_column)
 
         order += 1
@@ -161,16 +167,13 @@ def parse_action_items(action_doc_path: str) -> Tuple[List[ActionItem], List[str
                 details=details,
                 heading=current_heading,
                 source_column=source_column,
-                column=DONE_COLUMN_NAME if completed else source_column,
+                column=source_column,
                 source_line=line_index + 1,
                 line_index=line_index,
                 order=order,
                 completed=completed,
             )
         )
-
-    if DONE_COLUMN_NAME not in seen_sections:
-        section_order.append(DONE_COLUMN_NAME)
 
     return items, section_order, lines
 
@@ -204,7 +207,7 @@ def card_column_name(card: dict) -> str:
 def card_done_state(card: dict) -> bool:
     if card.get("closed"):
         return True
-    return card_column_name(card) == DONE_COLUMN_NAME
+    return card_column_name(card) == LEGACY_DONE_COLUMN_NAME
 
 
 def card_details_for_markdown(card: dict) -> str:
@@ -289,7 +292,7 @@ def apply_two_way_markdown_updates(
             continue
 
         column_name = card_column_name(card)
-        if column_name and column_name != DONE_COLUMN_NAME:
+        if column_name and column_name != LEGACY_DONE_COLUMN_NAME:
             source_column = column_name
         else:
             source_column = heading_to_column(parse_section_from_description(card.get("description") or "") or "Uncategorized")
@@ -305,7 +308,7 @@ def apply_two_way_markdown_updates(
                 details=details,
                 heading=source_column,
                 source_column=source_column,
-                column=DONE_COLUMN_NAME if done else source_column,
+                column=source_column,
                 source_line=line_index + 1,
                 line_index=line_index,
                 order=max_order,
@@ -492,6 +495,18 @@ def ensure_columns(
     return {column["name"]: column["id"] for column in refreshed}
 
 
+def list_board_columns(client: FizzyClient, account_slug: str, board_id: str) -> List[dict]:
+    return client.get_paginated(f"/{account_slug}/boards/{board_id}/columns")
+
+
+def delete_column(client: FizzyClient, account_slug: str, board_id: str, column_id: str) -> None:
+    client.request(
+        "DELETE",
+        f"/{account_slug}/boards/{board_id}/columns/{column_id}",
+        expected=(204,),
+    )
+
+
 def get_board_cards(client: FizzyClient, account_slug: str, board_id: str) -> List[dict]:
     query = urlencode([("board_ids[]", board_id), ("indexed_by", "all")])
     return client.get_paginated(f"/{account_slug}/cards?{query}")
@@ -504,6 +519,46 @@ def get_existing_synced_cards(cards: List[dict]) -> Dict[str, dict]:
         if key:
             by_key[key] = card
     return by_key
+
+
+def cleanup_empty_managed_columns(
+    client: FizzyClient,
+    account_slug: str,
+    board_id: str,
+    active_columns: List[str],
+    managed_columns: List[str],
+) -> int:
+    columns = list_board_columns(client, account_slug, board_id)
+    cards = get_board_cards(client, account_slug, board_id)
+
+    active_set = set(active_columns)
+    managed_set = set(managed_columns)
+    open_card_counts_by_column_id: Dict[str, int] = {}
+
+    for card in cards:
+        if card.get("closed"):
+            continue
+        column_id = ((card.get("column") or {}).get("id") or "").strip()
+        if not column_id:
+            continue
+        open_card_counts_by_column_id[column_id] = open_card_counts_by_column_id.get(column_id, 0) + 1
+
+    removed = 0
+    for column in columns:
+        name = clean_text(str(column.get("name") or ""))
+        column_id = str(column.get("id") or "")
+        if not name or not column_id:
+            continue
+        if name not in managed_set:
+            continue
+        if name in active_set:
+            continue
+        if open_card_counts_by_column_id.get(column_id, 0) > 0:
+            continue
+        delete_column(client, account_slug, board_id, column_id)
+        removed += 1
+
+    return removed
 
 
 def parse_created_card_number(headers: Dict[str, str]) -> Optional[str]:
@@ -566,9 +621,12 @@ def sync(
     close_obsolete: bool,
     two_way: bool,
 ) -> Dict[str, int]:
+    del two_way
+
     stats = {
         "created": 0,
         "updated": 0,
+        "closed": 0,
         "reopened": 0,
         "moved": 0,
         "closed_obsolete": 0,
@@ -579,58 +637,56 @@ def sync(
     existing_by_key = get_existing_synced_cards(existing_cards)
     desired_keys = {item.key for item in items}
 
-    done_column_id = column_ids[DONE_COLUMN_NAME]
-
     for item in items:
         card = existing_by_key.get(item.key)
         description = build_description(item, action_doc_path, digest_branch)
-        target_column_id = column_ids[item.column]
+        target_column_id = column_ids.get(item.source_column)
+        desired_title = card_sync_title(item)
 
         if card:
             card_number = str(card["number"])
 
-            if card.get("closed"):
-                reopen_card(client, account_slug, card_number)
-                stats["reopened"] += 1
-
             needs_update = (
-                card.get("title") != item.title
+                card.get("title") != desired_title
                 or (card.get("description") or "") != description
             )
             if needs_update:
                 client.request(
                     "PUT",
                     f"/{account_slug}/cards/{card_number}",
-                    payload={"card": {"title": item.title, "description": description}},
+                    payload={"card": {"title": desired_title, "description": description}},
                     expected=(200,),
                 )
                 stats["updated"] += 1
             else:
                 stats["unchanged"] += 1
 
+            if item.completed:
+                if not card.get("closed"):
+                    close_card(client, account_slug, card_number)
+                    stats["closed"] += 1
+                continue
+
+            if card.get("closed"):
+                reopen_card(client, account_slug, card_number)
+                stats["reopened"] += 1
+
+            if not target_column_id:
+                raise RuntimeError(
+                    f"Missing destination column for open item section '{item.source_column}'"
+                )
+
             current_column_id = ((card.get("column") or {}).get("id") or "").strip()
-
-            if two_way:
-                move_target: Optional[str] = None
-                if item.completed:
-                    move_target = done_column_id
-                elif current_column_id == done_column_id:
-                    move_target = column_ids.get(item.source_column, target_column_id)
-
-                if move_target and current_column_id != move_target:
-                    move_card_to_column(client, account_slug, card_number, move_target)
-                    stats["moved"] += 1
-            else:
-                if current_column_id != target_column_id:
-                    move_card_to_column(client, account_slug, card_number, target_column_id)
-                    stats["moved"] += 1
+            if current_column_id != target_column_id:
+                move_card_to_column(client, account_slug, card_number, target_column_id)
+                stats["moved"] += 1
 
             continue
 
         _, headers, _ = client.request(
             "POST",
             f"/{account_slug}/boards/{board_id}/cards",
-            payload={"card": {"title": item.title, "description": description}},
+            payload={"card": {"title": desired_title, "description": description}},
             expected=(201,),
         )
         card_number = parse_created_card_number(headers)
@@ -638,12 +694,20 @@ def sync(
             refreshed = get_existing_synced_cards(get_board_cards(client, account_slug, board_id))
             created = refreshed.get(item.key)
             if not created:
-                raise RuntimeError(f"Could not resolve new card number for '{item.title}'")
+                raise RuntimeError(f"Could not resolve new card number for '{desired_title}'")
             card_number = str(created["number"])
 
-        move_card_to_column(client, account_slug, card_number, target_column_id)
         stats["created"] += 1
-        stats["moved"] += 1
+        if item.completed:
+            close_card(client, account_slug, card_number)
+            stats["closed"] += 1
+        else:
+            if not target_column_id:
+                raise RuntimeError(
+                    f"Missing destination column for open item section '{item.source_column}'"
+                )
+            move_card_to_column(client, account_slug, card_number, target_column_id)
+            stats["moved"] += 1
 
     if close_obsolete:
         for key, card in existing_by_key.items():
@@ -754,8 +818,12 @@ def main() -> int:
     items, section_order, lines = parse_action_items(action_doc_path)
     if items:
         print(f"Found {len(items)} checklist items in {action_doc_path}")
+        open_count = sum(1 for item in items if not item.completed)
+        completed_count = sum(1 for item in items if item.completed)
+        print(f"- open: {open_count}")
+        print(f"- completed: {completed_count}")
         for section in section_order:
-            count = sum(1 for item in items if item.column == section)
+            count = sum(1 for item in items if not item.completed and item.source_column == section)
             print(f"- {section}: {count}")
     else:
         if not args.two_way:
@@ -811,6 +879,8 @@ def main() -> int:
         print("No checklist items available after two-way processing")
         return 0
 
+    managed_columns = sorted({item.source_column for item in items} | {LEGACY_DONE_COLUMN_NAME})
+
     stats = sync(
         client=client,
         account_slug=account_slug,
@@ -822,9 +892,25 @@ def main() -> int:
         close_obsolete=args.close_obsolete,
         two_way=args.two_way,
     )
+    stats["archived_columns"] = cleanup_empty_managed_columns(
+        client=client,
+        account_slug=account_slug,
+        board_id=board_id,
+        active_columns=section_order,
+        managed_columns=managed_columns,
+    )
 
     print("Sync complete")
-    for key in ("created", "updated", "reopened", "moved", "closed_obsolete", "unchanged"):
+    for key in (
+        "created",
+        "updated",
+        "closed",
+        "reopened",
+        "moved",
+        "closed_obsolete",
+        "archived_columns",
+        "unchanged",
+    ):
         print(f"- {key}: {stats[key]}")
 
     return 0

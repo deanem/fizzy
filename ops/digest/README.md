@@ -1,124 +1,76 @@
-# Digest Fizzy Integration (Separate Stack)
+# Digest Fizzy Integration
 
-This folder runs a separate Fizzy instance for Digest planning and provides one-way sync from the Digest internal roadmap markdown into Fizzy cards.
+A separate Fizzy instance used as the operational task board for Digest product work,
+with a CLI tool (`fizzy.py`) for AI agent access.
 
 ## Purpose
 
-Use this Fizzy instance as the operational board for Digest product work:
-- View all open product tasks as a Fizzy board.
-- Move, reorder, and manage tasks in Fizzy.
-- Mark tasks done natively in Fizzy.
-- Fizzy is the source of truth for task state.
+- Human manages tasks in the Fizzy UI (create, move, rename, reorder, delete)
+- AI agents interact via `fizzy.py` (read board, create cards, close cards, manage columns)
+- Fizzy is the single source of truth — no markdown sync
 
-## Scope and Ownership
-- Integration code lives in `ops/digest` in the Fizzy repo.
-- This is integration logic, not a Fizzy core feature.
-- Source scope is intentionally narrow: internal roadmap only.
+## What AI agents can do
 
-## Source Doc and Branch Guard
-- Source doc candidates (in order):
-  - `docs/PRODUCT_ROADMAP_INTERNAL.md`
-  - `PRODUCT_ROADMAP_INTERNAL.md`
-- The script refuses to sync unless the Digest repo branch is `dev`.
+| Operation | Command |
+|---|---|
+| Read full board | `fizzy.py board` |
+| Create card (→ MAYBE? triage) | `fizzy.py cards create "Title"` |
+| Create card in specific column | `fizzy.py cards create "Title" --column "Column Name"` |
+| Close a card | `fizzy.py cards close NUMBER` |
+| Move card to column | `fizzy.py cards move NUMBER --column "Column Name"` |
+| List columns | `fizzy.py columns list` |
+| Add column | `fizzy.py columns add "Name"` |
+| Delete column (cards → MAYBE?) | `fizzy.py columns delete "Name"` |
+| Reorder column | `fizzy.py columns move "Name" --position N` |
 
-## Board Model
-- Board name default: `Digest Product Action Items` (`FIZZY_BOARD_NAME` to override)
-- Columns map from roadmap `###` headings that have at least one open item (`- [ ]`)
-- Completed items (`- [x]`) are ignored; Fizzy manages completion natively
-- Empty sync-managed columns are automatically removed after sync
-- Synced cards include a stable key in description:
-  - `Digest Sync Key: digest-internal-...`
+AI agents cannot delete cards — only the human can do that in the Fizzy UI.
 
-## Sync Behavior (one-way: MD → Fizzy)
-- `- [ ] item` creates/updates an open card in its mapped section column.
-- `- [x] item` is ignored — completion is managed in Fizzy, not synced from MD.
-- Open items removed from the markdown close the corresponding card (`FIZZY_CLOSE_OBSOLETE=true`).
+## Setup
 
-## Conflict Policy
-- Sync key identity is authoritative.
-- Title/details normalise back to markdown text on each sync run.
-- Card completion state is owned by Fizzy and never overwritten by the sync.
-
-## 1) Start Fizzy Container
+### 1) Start Fizzy container
 ```bash
 cd /srv/fizzy/ops/digest
 cp .env.example .env
-```
-
-Generate a secret and set it in `.env`:
-```bash
-openssl rand -hex 64
-```
-
-Then run:
-```bash
+openssl rand -hex 64   # paste result as FIZZY_SECRET_KEY_BASE
 docker compose up -d
 ```
 
-## 2) Create API Token
-In Fizzy UI:
-1. Sign in and create/select account.
-2. Open profile API section.
-3. Create a personal access token (read/write).
-4. Set `FIZZY_API_TOKEN` in `.env`.
+### 2) Create API token
+In the Fizzy UI: profile → API → create a personal access token (read/write).
+Set `FIZZY_API_TOKEN` in `.env`.
 
-Set `FIZZY_ACCOUNT_SLUG` if auto-discovery is not possible.
-
-## 3) Configure Environment
-Primary env file:
-- `/srv/fizzy/ops/digest/.env`
-
-Key vars:
-- `FIZZY_API_BASE_URL`
-- `FIZZY_API_TOKEN`
-- `FIZZY_ACCOUNT_SLUG`
-- `FIZZY_BOARD_NAME`
-- `FIZZY_CLOSE_OBSOLETE`
-- `DIGEST_REPO_PATH`
-- `DIGEST_ACTION_DOC` (optional explicit doc path)
-
-## 4) Dry Run
+### 3) Run
 ```bash
 cd /srv/fizzy/ops/digest
 set -a; . ./.env; set +a
-python3 sync_product_roadmap_internal.py --dry-run
+python3 fizzy.py board
 ```
 
-## 5) Sync
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `FIZZY_API_BASE_URL` | URL of the Fizzy instance |
+| `FIZZY_API_TOKEN` | Personal access token |
+| `FIZZY_ACCOUNT_SLUG` | Account slug (auto-discovered if omitted) |
+| `FIZZY_BOARD_NAME` | Board name (default: `Digest Product Action Items`) |
+
+## Remote access
+
+`fizzy.py` only needs network access to the Fizzy API — it does not need to run
+on the same server as Fizzy. To run locally against the dev instance:
+
 ```bash
-cd /srv/fizzy/ops/digest
-set -a; . ./.env; set +a
-python3 sync_product_roadmap_internal.py
+export FIZZY_API_BASE_URL=https://fizzy.dev.thedigest.co
+export FIZZY_API_TOKEN=your_token
+python3 fizzy.py board
 ```
 
-Useful flags:
-- `--no-close-obsolete` — keep cards for items removed from the markdown
-
-## 6) Automate with Cron
-Run on a schedule to keep Fizzy up to date when the roadmap doc changes:
-```bash
-*/15 * * * * cd /srv/fizzy/ops/digest && /bin/bash -lc 'set -a; . ./.env; set +a; python3 sync_product_roadmap_internal.py' >> sync.log 2>&1
-```
-
-## Safety
-- Use dry-run before major changes.
-- Keep Digest repo history for rollback.
-- Do not modify Fizzy core code for integration behavior.
-
-## Fork Upkeep (Basecamp -> Your Fork)
-Fast-forward when clean:
+## Fork upkeep (Basecamp → your fork)
 ```bash
 cd /srv/fizzy
 git fetch upstream
 git checkout main
 git merge --ff-only upstream/main
 git push origin main
-```
-
-If local commits exist on `main`, rebase:
-```bash
-git fetch upstream
-git checkout main
-git rebase upstream/main
-git push --force-with-lease origin main
 ```

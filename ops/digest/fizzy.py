@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_create = cards_sub.add_parser("create", help="Create a card")
     p_create.add_argument("title", help="Card title")
-    p_create.add_argument("--column", "-c", help=f"Target column (default: {DEFAULT_COLUMN})")
+    p_create.add_argument("--column", "-c", help="Target column name (omit to land in MAYBE? triage)")
 
     p_close = cards_sub.add_parser("close", help="Close a card")
     p_close.add_argument("number", help="Card number")

@@ -6,7 +6,7 @@ Reads env from the same .env used by the sync script.
 Usage:
   fizzy.py board                              # Full board overview (default)
   fizzy.py cards list                         # Open cards by column
-  fizzy.py cards create TITLE [--column COL] # Create card (default: MAYBE?)
+  fizzy.py cards create TITLE [--column COL] # Create card (no column → MAYBE? triage area)
   fizzy.py cards close NUMBER                 # Close a card
   fizzy.py cards move NUMBER --column COL     # Move card to a column
   fizzy.py columns list                       # List columns in order
@@ -41,8 +41,6 @@ BASE_URL   = os.environ.get("FIZZY_API_BASE_URL", "http://localhost:3333").rstri
 TOKEN      = os.environ.get("FIZZY_API_TOKEN", "")
 SLUG       = os.environ.get("FIZZY_ACCOUNT_SLUG", "1").lstrip("/")
 BOARD_NAME = os.environ.get("FIZZY_BOARD_NAME", "Digest Product Action Items")
-DEFAULT_COLUMN = "MAYBE?"
-
 COLUMN_COLORS = [
     "var(--color-card-default)",
     "var(--color-card-1)",
@@ -115,35 +113,13 @@ def get_columns(board_id: str) -> List[dict]:
 
 
 def resolve_column(board_id: str, name: str) -> dict:
-    """Find a column by name (case-insensitive). Creates MAYBE? if needed."""
+    """Find a regular column by name (case-insensitive)."""
     cols = get_columns(board_id)
     for col in cols:
         if (col.get("name") or "").strip().lower() == name.strip().lower():
             return col
-    if name.strip() == DEFAULT_COLUMN:
-        return ensure_maybe_column(board_id, cols)
     print(f"ERROR: Column '{name}' not found.", file=sys.stderr)
     print(f"Available: {', '.join(c['name'] for c in cols)}", file=sys.stderr)
-    sys.exit(1)
-
-
-def ensure_maybe_column(board_id: str, cols: Optional[List[dict]] = None) -> dict:
-    if cols is None:
-        cols = get_columns(board_id)
-    for col in cols:
-        if (col.get("name") or "").strip() == DEFAULT_COLUMN:
-            return col
-    # Create it
-    _request(
-        "POST",
-        f"/{SLUG}/boards/{board_id}/columns",
-        payload={"column": {"name": DEFAULT_COLUMN, "color": COLUMN_COLORS[0]}},
-        expected=(201,),
-    )
-    for col in get_columns(board_id):
-        if (col.get("name") or "").strip() == DEFAULT_COLUMN:
-            return col
-    print("ERROR: Failed to create MAYBE? column.", file=sys.stderr)
     sys.exit(1)
 
 
@@ -192,7 +168,7 @@ def print_board(board_id: str) -> None:
         print()
 
     if triage:
-        print(f"Triage (no column)  ({len(triage)})")
+        print(f"MAYBE? / triage (no column)  ({len(triage)})")
         for card in triage:
             print(_card_line(card))
         print()
@@ -211,9 +187,6 @@ def cmd_cards_list(args: argparse.Namespace, board_id: str) -> None:
 
 
 def cmd_cards_create(args: argparse.Namespace, board_id: str) -> None:
-    col_name = args.column or DEFAULT_COLUMN
-    col      = resolve_column(board_id, col_name)
-
     _, headers, _ = _request(
         "POST",
         f"/{SLUG}/boards/{board_id}/cards",
@@ -222,27 +195,31 @@ def cmd_cards_create(args: argparse.Namespace, board_id: str) -> None:
     )
 
     # Resolve card number from Location header
-    location   = headers.get("Location") or headers.get("location") or ""
-    m          = re.search(r"/cards/([^/.]+)", location)
+    location    = headers.get("Location") or headers.get("location") or ""
+    m           = re.search(r"/cards/([^/.]+)", location)
     card_number = m.group(1) if m else None
 
     if not card_number:
-        # Fall back to finding the newest card with this title
         for card in get_open_cards(board_id):
             if card.get("title", "").strip() == args.title.strip():
                 card_number = str(card["number"])
                 break
 
-    if card_number:
-        _request(
-            "POST",
-            f"/{SLUG}/cards/{card_number}/triage",
-            payload={"column_id": col["id"]},
-            expected=(204,),
-        )
-        print(f"Created card #{card_number}: {args.title!r} → {col['name']}")
+    if args.column:
+        col = resolve_column(board_id, args.column)
+        if card_number:
+            _request(
+                "POST",
+                f"/{SLUG}/cards/{card_number}/triage",
+                payload={"column_id": col["id"]},
+                expected=(204,),
+            )
+        destination = col["name"]
     else:
-        print(f"Created card: {args.title!r} → {col['name']} (card number unknown)")
+        destination = "MAYBE? (triage)"
+
+    num_str = f"#{card_number}" if card_number else "(number unknown)"
+    print(f"Created card {num_str}: {args.title!r} → {destination}")
 
 
 def cmd_cards_close(args: argparse.Namespace, board_id: str) -> None:

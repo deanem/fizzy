@@ -1,6 +1,10 @@
+name: fizzy
 services:
   fizzy:
     image: ghcr.io/basecamp/fizzy:main
+    networks:
+      - default
+      - edge-proxy
     container_name: fizzy-digest
     restart: unless-stopped
     env_file:
@@ -27,3 +31,9 @@ services:
 
 volumes:
   fizzy_storage:
+    external: true
+    name: digest_fizzy_storage
+
+networks:
+  edge-proxy:
+    external: true

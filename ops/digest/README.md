@@ -67,10 +67,17 @@ python3 fizzy.py board
 ```
 
 ## Fork upkeep (Basecamp → your fork)
+
+This fork has custom commits in `ops/digest/` that don't exist upstream, so
+`--ff-only` won't work. Use rebase to replay your commits on top of upstream:
+
 ```bash
 cd /srv/fizzy
 git fetch upstream
 git checkout main
-git merge --ff-only upstream/main
-git push origin main
+git rebase upstream/main
+git push origin main --force-with-lease
 ```
+
+No conflicts expected — all custom changes are in `ops/digest/` which upstream
+does not touch.

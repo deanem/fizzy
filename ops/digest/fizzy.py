@@ -4,15 +4,16 @@
 Reads env from the same .env used by the sync script.
 
 Usage:
-  fizzy.py board                              # Full board overview (default)
-  fizzy.py cards list                         # Open cards by column
-  fizzy.py cards create TITLE [--column COL] # Create card (no column → MAYBE? triage area)
-  fizzy.py cards close NUMBER                 # Close a card
-  fizzy.py cards move NUMBER --column COL     # Move card to a column
-  fizzy.py columns list                       # List columns in order
-  fizzy.py columns add NAME [--color COLOR]   # Add a column
-  fizzy.py columns delete NAME                # Delete column (cards → triage)
-  fizzy.py columns move NAME --position N     # Move column to position (1-based)
+  fizzy.py board                                          # Full board overview (default)
+  fizzy.py cards list                                     # Open cards by column
+  fizzy.py cards create TITLE [--column COL] [--description DESC]  # Create card
+  fizzy.py cards describe NUMBER DESCRIPTION              # Set/update description on a card
+  fizzy.py cards close NUMBER                             # Close a card
+  fizzy.py cards move NUMBER --column COL                 # Move card to a column
+  fizzy.py columns list                                   # List columns in order
+  fizzy.py columns add NAME [--color COLOR]               # Add a column
+  fizzy.py columns delete NAME                            # Delete column (cards → triage)
+  fizzy.py columns move NAME --position N                 # Move column to position (1-based)
 
 Constraints:
   - Cards are never deleted (only closeable). Only the human can delete cards.
@@ -187,10 +188,13 @@ def cmd_cards_list(args: argparse.Namespace, board_id: str) -> None:
 
 
 def cmd_cards_create(args: argparse.Namespace, board_id: str) -> None:
+    card_payload: dict = {"title": args.title}
+    if args.description:
+        card_payload["description"] = args.description
     _, headers, _ = _request(
         "POST",
         f"/{SLUG}/boards/{board_id}/cards",
-        payload={"card": {"title": args.title}},
+        payload={"card": card_payload},
         expected=(201,),
     )
 
@@ -220,6 +224,16 @@ def cmd_cards_create(args: argparse.Namespace, board_id: str) -> None:
 
     num_str = f"#{card_number}" if card_number else "(number unknown)"
     print(f"Created card {num_str}: {args.title!r} → {destination}")
+
+
+def cmd_cards_describe(args: argparse.Namespace, board_id: str) -> None:
+    _request(
+        "PATCH",
+        f"/{SLUG}/cards/{args.number}",
+        payload={"card": {"description": args.description}},
+        expected=(204,),
+    )
+    print(f"Updated description on card #{args.number}")
 
 
 def cmd_cards_close(args: argparse.Namespace, board_id: str) -> None:
@@ -323,6 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_create = cards_sub.add_parser("create", help="Create a card")
     p_create.add_argument("title", help="Card title")
     p_create.add_argument("--column", "-c", help="Target column name (omit to land in MAYBE? triage)")
+    p_create.add_argument("--description", "-d", help="Card description (plain text)")
+
+    p_describe = cards_sub.add_parser("describe", help="Set or update description on a card")
+    p_describe.add_argument("number", help="Card number")
+    p_describe.add_argument("description", help="New description text (plain text)")
 
     p_close = cards_sub.add_parser("close", help="Close a card")
     p_close.add_argument("number", help="Card number")
@@ -373,6 +392,8 @@ def main() -> int:
             cmd_cards_list(args, board_id)
         elif args.cards_command == "create":
             cmd_cards_create(args, board_id)
+        elif args.cards_command == "describe":
+            cmd_cards_describe(args, board_id)
         elif args.cards_command == "close":
             cmd_cards_close(args, board_id)
         elif args.cards_command == "move":

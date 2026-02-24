@@ -16,6 +16,8 @@ with a CLI tool (`fizzy.py`) for AI agent access.
 | Read full board | `fizzy.py board` |
 | Create card (→ MAYBE? triage) | `fizzy.py cards create "Title"` |
 | Create card in specific column | `fizzy.py cards create "Title" --column "Column Name"` |
+| Create card with description | `fizzy.py cards create "Title" --description "Details..."` |
+| Set/update card description | `fizzy.py cards describe NUMBER "Details..."` |
 | Close a card | `fizzy.py cards close NUMBER` |
 | Move card to column | `fizzy.py cards move NUMBER --column "Column Name"` |
 | List columns | `fizzy.py columns list` |

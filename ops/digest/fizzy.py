@@ -6,6 +6,7 @@ Reads env from the same .env used by the sync script.
 Usage:
   fizzy.py board                                          # Full board overview (default)
   fizzy.py cards list                                     # Open cards by column
+  fizzy.py cards read NUMBER                              # Read a card's title and description
   fizzy.py cards create TITLE [--column COL] [--description DESC]  # Create card
   fizzy.py cards describe NUMBER DESCRIPTION              # Set/update description on a card
   fizzy.py cards close NUMBER                             # Close a card
@@ -226,6 +227,18 @@ def cmd_cards_create(args: argparse.Namespace, board_id: str) -> None:
     print(f"Created card {num_str}: {args.title!r} → {destination}")
 
 
+def cmd_cards_read(args: argparse.Namespace, board_id: str) -> None:
+    cards = get_open_cards(board_id)
+    for card in cards:
+        if str(card.get("number")) == str(args.number):
+            print(f"#{card['number']} {card.get('title', '').strip()}")
+            desc = (card.get("description") or "").strip()
+            print(desc if desc else "(no description)")
+            return
+    print(f"ERROR: card #{args.number} not found (closed cards are not searchable).", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_cards_describe(args: argparse.Namespace, board_id: str) -> None:
     _request(
         "PATCH",
@@ -334,6 +347,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     cards_sub.add_parser("list", help="List open cards by column")
 
+    p_read = cards_sub.add_parser("read", help="Read a card's title and description")
+    p_read.add_argument("number", help="Card number")
+
     p_create = cards_sub.add_parser("create", help="Create a card")
     p_create.add_argument("title", help="Card title")
     p_create.add_argument("--column", "-c", help="Target column name (omit to land in MAYBE? triage)")
@@ -390,6 +406,8 @@ def main() -> int:
     elif args.command == "cards":
         if not args.cards_command or args.cards_command == "list":
             cmd_cards_list(args, board_id)
+        elif args.cards_command == "read":
+            cmd_cards_read(args, board_id)
         elif args.cards_command == "create":
             cmd_cards_create(args, board_id)
         elif args.cards_command == "describe":
